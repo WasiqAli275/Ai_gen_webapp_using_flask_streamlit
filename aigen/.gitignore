@@ -1,0 +1,4 @@
+# Ignore API keys and secrets
+aaapppii.env
+GEMIN_API_KEY.env
+gem_api.env

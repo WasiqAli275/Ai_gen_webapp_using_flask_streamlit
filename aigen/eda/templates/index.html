@@ -1,0 +1,23 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Iris Dataset EDA</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="container mt-4">
+    <h1 class="mb-4">🌸 Iris Dataset EDA with Flask</h1>
+
+    <h3>📊 Summary Statistics</h3>
+    {{ tables[0]|safe }}
+
+    <h3>🧪 Null Values</h3>
+    {{ tables[1]|safe }}
+
+    <h3>📈 Species Count Plot</h3>
+    <img src="data:image/png;base64,{{ count_plot }}" class="img-fluid"/>
+
+    <h3>🔥 Feature Correlation Heatmap</h3>
+    <img src="data:image/png;base64,{{ heatmap_plot }}" class="img-fluid"/>
+</body>
+</html>
