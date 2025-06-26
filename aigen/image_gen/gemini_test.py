@@ -1,7 +1,7 @@
 import google.generativeai as genai
 
 # Step 1: Apna API key set karen
-API_KEY = "GEMINI_API_KEY"  # Yahan apna API key dalen
+API_KEY = "GEMINI_API_KEY.env"  # Yahan apna API key dalen
 genai.configure(api_key=API_KEY)
 
 # Step 2: Model ko initialize karen
