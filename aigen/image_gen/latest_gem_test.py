@@ -1,7 +1,7 @@
 import google.generativeai as genai
 
 # API Key set karen
-genai.configure(api_key="AIzaSyBqsWxzgz7r5dGcpiJfeUHnZJbxqQQbIyw")
+genai.configure(api_key="new_api_key.env") # enter your own api key in double quotes "" of this line.
 
 # Model initialize karen
 model = genai.GenerativeModel('gemini-1.5-pro-latest')  # Latest version
