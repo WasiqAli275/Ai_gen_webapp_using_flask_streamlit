@@ -1,4 +1,5 @@
-# import all libraries "pehly": unknown word.
+# import all libraries and create a web app that can predict the iris data set by using seaborn and predict it my using sklearn machine learning model and
+# it can also check it how it the best fit of the data set and also deploy the best ml model in it
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
