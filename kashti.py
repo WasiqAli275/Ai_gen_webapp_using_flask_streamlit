@@ -1,3 +1,6 @@
+# we can create a streamlit webapp and add titanic data set in it by using seaborn and firstly, we can add some slideber
+# in it and also add some machine learning models in it for the prediction and also we can change the machine learning models and
+# its accuracy according to the needs and also have a fuction to change the parameter in it of this webapp
 import streamlit as st
 import seaborn as sns
 import pandas as pd

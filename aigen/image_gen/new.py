@@ -1,6 +1,6 @@
 import google.generativeai as genai
 
-genai.configure(api_key="AIzaSyBqsWxzgz7r5dGcpiJfeUHnZJbxqQQbIyw")  # Apna API key yahan dalen
+genai.configure(api_key="Enter your own api to run this model")  # Apna API key yahan dalen
 # Gemini-1.5-pro ki jagah Gemini-1.0-pro use karen (jo free tier mein zyada requests allow karta hai)
 model = genai.GenerativeModel('gemini-1.0-pro')  # Change to older version
 
