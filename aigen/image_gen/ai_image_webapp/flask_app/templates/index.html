@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Image Generator</title>
+    <style>
+        body {
+            min-height: 100vh;
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #000 !important;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: linear-gradient(120deg, #f6d365 0%, #fda085 100%);
+            padding: 2rem 2.5rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            text-align: center;
+        }
+        h1 {
+            color: #fff;
+            margin-bottom: 1.5rem;
+            text-shadow: 1px 2px 8px #33333344;
+        }
+        form {
+            margin-bottom: 1.5rem;
+        }
+        input[type="text"] {
+            padding: 0.7rem 1rem;
+            border-radius: 0.7rem;
+            border: none;
+            width: 70%;
+            margin-right: 0.5rem;
+            font-size: 1rem;
+        }
+        button {
+            padding: 0.7rem 1.5rem;
+            border-radius: 0.7rem;
+            border: none;
+            background: linear-gradient(90deg, #43cea2 0%, #185a9d 100%);
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: linear-gradient(90deg, #185a9d 0%, #43cea2 100%);
+        }
+        .image-section {
+            margin-top: 2rem;
+        }
+        .generated-image {
+            max-width: 400px;
+            border-radius: 1rem;
+            box-shadow: 0 4px 16px 0 rgba(0,0,0,0.15);
+        }
+        .error {
+            color: #d7263d;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <h1 
+        style="
+            margin-bottom: 2rem;
+            letter-spacing:2px;
+            font-size:2.5rem;
+            text-align:center;
+            background: linear-gradient(90deg, #43cea2 0%, #185a9d 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            color: transparent;
+        "
+    >IMG GEN TOOL</h1>
+    <div class="container">
+        <h2 style="color:#fff; margin-bottom: 1.5rem; text-shadow: 1px 2px 8px #33333344;">AI Image Generator</h2>
+        <form method="POST" enctype="multipart/form-data">
+            <input type="text" name="prompt" placeholder="Describe your image..." required>
+            <button type="submit">Generate Image</button>
+        </form>
+        {% if image_url %}
+        <div class="image-section">
+            <img src="{{ image_url }}" alt="Generated Image" class="generated-image">
+        </div>
+        {% endif %}
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+    </div>
+</body>
+</html>

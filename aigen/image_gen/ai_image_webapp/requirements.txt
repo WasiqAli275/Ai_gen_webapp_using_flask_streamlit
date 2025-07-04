@@ -1,0 +1,5 @@
+streamlit>=1.22.0
+pillow>=9.0.0
+pymupdf>=1.22.0
+requests>=2.25.0
+python-dotenv>=0.21.0
