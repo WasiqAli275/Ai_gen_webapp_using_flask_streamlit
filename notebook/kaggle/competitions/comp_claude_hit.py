@@ -1,0 +1,591 @@
+# Hull Tactical Market Prediction - Complete Code
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Standard imports Libraries
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+import os
+import gc
+import math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from xgboost import XGBRegressor
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import pyarrow as pa
+import pyarrow.parquet as pq
+import joblib
+import json
+import glob
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Print versions for reproducibility
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+print('pandas', pd.__version__)
+print('numpy', np.__version__)
+import xgboost as xgb
+print('xgboost', xgb.__version__)
+print('tensorflow', tf.__version__)
+print('scikit-learn', __import__('sklearn').__version__)
+print('pyarrow', pa.__version__)
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Load data with error handling
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+try:
+    train = pd.read_csv('/kaggle/input/hull-tactical-market-prediction/train.csv')
+    test = pd.read_csv('/kaggle/input/hull-tactical-market-prediction/test.csv')
+    print('✅ Data loaded from Kaggle path')
+except FileNotFoundError:
+    try:
+        train = pd.read_csv('train.csv')
+        test = pd.read_csv('test.csv')
+        print('✅ Data loaded from local path')
+    except FileNotFoundError:
+        print('❌ Data files not found. Please ensure train.csv and test.csv are available.')
+        raise
+
+print('train shape', train.shape)
+print('test shape', test.shape)
+display(train.head())
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Basic inspection and target identification
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+target = 'market_forward_excess_returns'
+print('target in columns?', target in train.columns)
+display(train.dtypes.value_counts())
+missing = train.isna().sum().sort_values(ascending=False)
+display(missing[missing>0].head(30))
+display(train[[target, 'forward_returns', 'risk_free_rate']].describe().T)
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Visualizations: target series, histogram, boxplot, correlation heatmap
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+plt.figure(figsize=(12,4))
+plt.plot(train['date_id'], train[target], label='market_forward_excess_returns')
+plt.xlabel('date_id')
+plt.ylabel('excess return')
+plt.title('Target series over date_id')
+plt.legend()
+plt.show()
+
+fig, axes = plt.subplots(1,2,figsize=(12,4))
+sns.histplot(train[target].dropna(), bins=80, ax=axes[0], kde=True)
+axes[0].set_title('Histogram of target')
+sns.boxplot(x=train[target].dropna(), ax=axes[1])
+axes[1].set_title('Boxplot of target')
+plt.show()
+# Check what columns are actually available
+print("\n=== COLUMN COMPARISON ===")
+train_cols = set(train.columns)
+test_cols = set(test.columns)
+common_cols = train_cols & test_cols
+train_only = train_cols - test_cols
+test_only = test_cols - train_cols
+
+print(f"Common columns: {len(common_cols)}")
+print(f"Train only: {len(train_only)} - {list(train_only)[:5]}")
+print(f"Test only: {len(test_only)} - {list(test_only)[:5]}")
+
+# Check if forward_returns exists
+forward_returns_available = 'forward_returns' in train.columns
+print(f"forward_returns in train: {forward_returns_available}")
+print(f"forward_returns in test: {'forward_returns' in test.columns}")
+
+corr = train.corr()
+corr_target = corr[target].abs().sort_values(ascending=False)
+top_feats = corr_target.index[1:31].tolist()
+plt.figure(figsize=(10,10))
+sns.heatmap(train[top_feats + [target]].corr(), cmap='coolwarm', center=0, vmin=-1, vmax=1)
+plt.title('Correlation matrix - top features vs target')
+plt.show()
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Feature engineering
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# Feature engineering with safer approach
+df = train.copy()
+
+# Only create forward_returns-based features if the column exists
+if 'forward_returns' in df.columns:
+    print("✅ Creating forward_returns-based features...")
+    for lag in [1,2,3]:
+        df[f'forward_returns_lag{lag}'] = df['forward_returns'].shift(lag)
+    
+    df['fr_roll_mean_5'] = df['forward_returns'].rolling(window=5, min_periods=1).mean()
+    df['fr_roll_std_5'] = df['forward_returns'].rolling(window=5, min_periods=1).std().fillna(0)
+    df['fr_roll_mean_20'] = df['forward_returns'].rolling(window=20, min_periods=1).mean()
+    df['fr_roll_std_20'] = df['forward_returns'].rolling(window=20, min_periods=1).std().fillna(0)
+else:
+    print("⚠️ forward_returns column not found. Skipping forward_returns-based features.")
+
+# Only create target-based features if target exists
+if target in df.columns:
+    print("✅ Creating target-based lag features...")
+    for lag in [1,2,3]:
+        df[f'{target}_lag{lag}'] = df[target].shift(lag)
+
+df['fr_roll_mean_5'] = df['forward_returns'].rolling(window=5, min_periods=1).mean()
+df['fr_roll_std_5'] = df['forward_returns'].rolling(window=5, min_periods=1).std().fillna(0)
+df['fr_roll_mean_20'] = df['forward_returns'].rolling(window=20, min_periods=1).mean()
+df['fr_roll_std_20'] = df['forward_returns'].rolling(window=20, min_periods=1).std().fillna(0)
+
+nunique = df.nunique()
+constant_cols = nunique[nunique<=1].index.tolist()
+print('constant or single-value columns:', len(constant_cols))
+df.drop(columns=constant_cols, inplace=True, errors='ignore')
+df.fillna(0, inplace=True)
+print('df shape after feature engineering', df.shape)
+display(df.head())
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Prepare training and validation splits (time-aware)
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+features = [c for c in df.columns if c not in ['date_id', target, 'forward_returns', 'risk_free_rate']]
+print('selected feature count', len(features))
+
+date_cut = df['date_id'].quantile(0.8)
+train_idx = df['date_id'] <= date_cut
+val_idx = df['date_id'] > date_cut
+
+X_train = df.loc[train_idx, features].values
+y_train = df.loc[train_idx, target].values
+X_val = df.loc[val_idx, features].values
+y_val = df.loc[val_idx, target].values
+
+print('X_train', X_train.shape, 'X_val', X_val.shape)
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Baseline XGBoost model
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+xgb_model = XGBRegressor(objective='reg:squarederror', n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42, n_jobs=4)
+xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=10, verbose=False)
+
+pred_val = xgb_model.predict(X_val)
+print('Baseline XGBoost - MSE', mean_squared_error(y_val, pred_val))
+print('Baseline XGBoost - MAE', mean_absolute_error(y_val, pred_val))
+print('Baseline XGBoost - R2', r2_score(y_val, pred_val))
+
+try:
+    fi = xgb_model.get_booster().get_score(importance_type='gain')
+    fi2 = {features[int(k.replace('f',''))]:v for k,v in fi.items()}
+    sorted_fi = sorted(fi2.items(), key=lambda x: x[1], reverse=True)
+    print('Top 15 features by gain')
+    for f,v in sorted_fi[:15]:
+        print(f, v)
+except Exception as e:
+    print('feature importance error', e)
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Hyperparameter tuning (full run)
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+tscv = TimeSeriesSplit(n_splits=3)
+param_grid = {
+    'max_depth': [3,5,7],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'n_estimators': [50, 100, 200]
+}
+
+gsearch = GridSearchCV(estimator=XGBRegressor(objective='reg:squarederror', random_state=42, n_jobs=4),
+                   param_grid=param_grid, cv=tscv, scoring='neg_mean_squared_error', verbose=2)
+gsearch.fit(X_train, y_train)
+
+print('best params', gsearch.best_params_)
+best_xgb = gsearch.best_estimator_
+pred_val_g = best_xgb.predict(X_val)
+
+print('Tuned XGBoost - MSE', mean_squared_error(y_val, pred_val_g))
+print('Tuned XGBoost - MAE', mean_absolute_error(y_val, pred_val_g))
+print('Tuned XGBoost - R2', r2_score(y_val, pred_val_g))
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# Keras feedforward network (full train)
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_val_s = scaler.transform(X_val)
+
+def build_ffn(input_shape):
+    model = keras.Sequential([
+        layers.Input(shape=(input_shape,)),
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.2),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(1)
+    ])
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3), loss='mse', metrics=['mae'])
+    return model
+
+ffn = build_ffn(X_train_s.shape[1])
+es = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+history = ffn.fit(X_train_s, y_train, validation_data=(X_val_s, y_val), epochs=100, batch_size=128, callbacks=[es], verbose=2)
+
+pred_val_nn = ffn.predict(X_val_s).ravel()
+print('NN - MSE', mean_squared_error(y_val, pred_val_nn))
+print('NN - MAE', mean_absolute_error(y_val, pred_val_nn))
+print('NN - R2', r2_score(y_val, pred_val_nn))
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+# Strategy Simulation & Competition-style Scoring
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+signal = pred_val_g
+
+def signal_to_weight(s, lower=0.0, upper=2.0):
+    lo = np.percentile(s, 5)
+    hi = np.percentile(s, 95)
+    w = (s - lo) / (hi - lo + 1e-9) * (upper - lower) + lower
+    return np.clip(w, lower, upper)
+
+weights = signal_to_weight(signal)
+val_df = df.loc[val_idx].copy().reset_index(drop=True)
+val_df['pred'] = signal
+val_df['weight'] = weights
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+# transaction cost per round-trip (default 5 bps)
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+tc = 0.0005
+val_df['turnover'] = val_df['weight'].diff().abs().fillna(0)
+val_df['tc_cost'] = val_df['turnover'] * tc
+
+# strategy excess returns before cost - use available return column
+if 'forward_returns' in val_df.columns:
+    val_df['strategy_excess'] = val_df['weight'] * val_df['forward_returns']
+    market_ret = val_df['forward_returns']
+else:
+    # If forward_returns not available, create synthetic returns for demo
+    print("⚠️ forward_returns not available, using synthetic returns for strategy demo")
+    val_df['forward_returns'] = np.random.normal(0.001, 0.02, len(val_df))  # Synthetic daily returns
+    val_df['strategy_excess'] = val_df['weight'] * val_df['forward_returns']
+    market_ret = val_df['forward_returns']
+
+val_df['strategy_excess_net'] = val_df['strategy_excess'] - val_df['tc_cost']
+
+def sharpe_ratio(returns, periods=252):
+    mean = returns.mean()
+    vol = returns.std()
+    if vol == 0: return np.nan
+    return (mean/vol) * np.sqrt(periods)
+
+strat_ret = val_df['strategy_excess_net']
+market_ret = val_df['forward_returns']
+
+print('Strategy net mean daily', strat_ret.mean())
+print('Market mean daily', market_ret.mean())
+print('Strategy net Sharpe', sharpe_ratio(strat_ret))
+print('Market Sharpe', sharpe_ratio(market_ret))
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+# volatility cap: scale weights to keep strategy vol <= 1.2 * market vol
+# _-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
+market_vol = market_ret.std()
+strat_vol = strat_ret.std()
+cap = 1.2 * market_vol
+print('market vol', market_vol, 'strategy vol', strat_vol, 'cap', cap)
+
+if strat_vol > cap and strat_vol>0:
+    scale = cap / strat_vol
+    val_df['weight_adj'] = val_df['weight'] * scale
+    val_df['turnover_adj'] = val_df['weight_adj'].diff().abs().fillna(0)
+    val_df['tc_cost_adj'] = val_df['turnover_adj'] * tc
+    val_df['strategy_excess_adj'] = val_df['weight_adj'] * val_df['forward_returns'] - val_df['tc_cost_adj']
+    print('Adjusted Strategy Sharpe', sharpe_ratio(val_df['strategy_excess_adj']))
+else:
+    val_df['weight_adj'] = val_df['weight']
+    val_df['strategy_excess_adj'] = val_df['strategy_excess_net']
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# cumulative returns
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+val_df['cum_strategy'] = (1 + val_df['strategy_excess_adj']).cumprod() - 1
+val_df['cum_market'] = (1 + val_df['forward_returns']).cumprod() - 1
+
+plt.figure(figsize=(12,6))
+plt.plot(val_df['date_id'], val_df['cum_strategy'], label='Strategy (net, adj)')
+plt.plot(val_df['date_id'], val_df['cum_market'], label='Market')
+plt.legend()
+plt.title('Cumulative returns: strategy vs market (validation)')
+plt.show()
+
+display(val_df[['date_id','pred','weight','weight_adj','forward_returns','strategy_excess_adj']].head())
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ============= PROCESS TEST DATA =============
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+print("\n" + "="*60)
+print("🔄 PROCESSING TEST DATA FOR PREDICTIONS")
+print("="*60)
+
+test_processed = test.copy()
+print(f"Original test shape: {test_processed.shape}")
+
+# Apply same feature engineering steps
+print("📊 Applying feature engineering...")
+
+# Check what columns are available in test data
+test_numeric_cols = test_processed.select_dtypes(include=[np.number]).columns.tolist()
+test_numeric_cols = [c for c in test_numeric_cols if c != 'date_id']
+
+print(f"Available numeric columns in test: {len(test_numeric_cols)}")
+
+# Only create features if the base column exists in test data
+if 'forward_returns' in test_processed.columns:
+    print("✅ Creating forward_returns-based features in test...")
+    for lag in [1,2,3]:
+        test_processed[f'forward_returns_lag{lag}'] = test_processed['forward_returns'].shift(lag)
+    
+    test_processed['fr_roll_mean_5'] = test_processed['forward_returns'].rolling(window=5, min_periods=1).mean()
+    test_processed['fr_roll_std_5'] = test_processed['forward_returns'].rolling(window=5, min_periods=1).std().fillna(0)
+    test_processed['fr_roll_mean_20'] = test_processed['forward_returns'].rolling(window=20, min_periods=1).mean()
+    test_processed['fr_roll_std_20'] = test_processed['forward_returns'].rolling(window=20, min_periods=1).std().fillna(0)
+else:
+    print("⚠️ forward_returns not in test data. Skipping forward_returns-based features.")
+
+# Create features from available test columns
+if len(test_numeric_cols) > 0:
+    base_test_cols = test_numeric_cols[:5]  # Use first 5 available numeric columns
+    for col in base_test_cols:
+        if col in test_processed.columns:
+            test_processed[f'{col}_lag1'] = test_processed[col].shift(1)
+            test_processed[f'{col}_roll_mean_3'] = test_processed[col].rolling(window=3, min_periods=1).mean()
+test_processed.drop(columns=constant_cols, inplace=True, errors='ignore')
+test_processed.fillna(0, inplace=True)
+
+available_features = [f for f in features if f in test_processed.columns]
+missing_features = [f for f in features if f not in test_processed.columns]
+
+print(f"✅ Available features: {len(available_features)}")
+print(f"❌ Missing features: {len(missing_features)}")
+
+if missing_features:
+    print("Missing features:", missing_features[:5])
+
+X_test = test_processed[available_features].values
+print(f"Final test data shape: {X_test.shape}")
+
+test_dates = test_processed['date_id'].values
+print(f"Test date range: {test_dates.min()} to {test_dates.max()}")
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ============= GENERATE PREDICTIONS =============
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+print("\n" + "="*60)
+print("🤖 GENERATING TEST PREDICTIONS")
+print("="*60)
+
+print("🌲 XGBoost predictions...")
+if len(available_features) == len(features):
+    xgb_predictions = best_xgb.predict(X_test)
+else:
+    print("⚠️  Feature mismatch! Using baseline XGBoost...")
+    temp_model = XGBRegressor(**best_xgb.get_params())
+    X_train_matched = df.loc[train_idx, available_features].values
+    temp_model.fit(X_train_matched, y_train)
+    xgb_predictions = temp_model.predict(X_test)
+
+print(f"XGBoost predictions range: {xgb_predictions.min():.6f} to {xgb_predictions.max():.6f}")
+
+print("🧠 Neural Network predictions...")
+try:
+    X_test_scaled = scaler.transform(X_test)
+    nn_predictions = ffn.predict(X_test_scaled, verbose=0).ravel()
+    print(f"NN predictions range: {nn_predictions.min():.6f} to {nn_predictions.max():.6f}")
+    
+    ensemble_predictions = 0.7 * xgb_predictions + 0.3 * nn_predictions
+    print(f"Ensemble predictions range: {ensemble_predictions.min():.6f} to {ensemble_predictions.max():.6f}")
+    
+    final_predictions = ensemble_predictions
+    model_used = "Ensemble (XGB + NN)"
+    
+except Exception as e:
+    print(f"NN prediction failed: {e}")
+    print("Using XGBoost predictions only...")
+    final_predictions = xgb_predictions
+    model_used = "XGBoost Only"
+
+print(f"🎯 Final model used: {model_used}")
+print(f"🎯 Final predictions stats:")
+print(f"   Mean: {final_predictions.mean():.6f}")
+print(f"   Std:  {final_predictions.std():.6f}")
+print(f"   Min:  {final_predictions.min():.6f}")
+print(f"   Max:  {final_predictions.max():.6f}")
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ============= CREATE PARQUET SUBMISSION =============
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+print("\n" + "="*60)
+print("📦 CREATING PARQUET SUBMISSION FILE")
+print("="*60)
+
+submission_df = pd.DataFrame({
+    'date_id': test_dates,
+    'market_forward_excess_returns': final_predictions
+})
+
+print(f"📊 Submission DataFrame Info:")
+print(f"   Shape: {submission_df.shape}")
+print(f"   Columns: {list(submission_df.columns)}")
+print(f"   Date range: {submission_df['date_id'].min()} to {submission_df['date_id'].max()}")
+print(f"   Missing values: {submission_df.isnull().sum().sum()}")
+
+submission_df['date_id'] = submission_df['date_id'].astype('int32')
+submission_df['market_forward_excess_returns'] = submission_df['market_forward_excess_returns'].astype('float32')
+
+print(f"📋 Data types after optimization:")
+print(submission_df.dtypes)
+
+print("\n💾 Saving submission as PARQUET...")
+
+submission_df.to_parquet('submission.parquet', index=False, engine='pyarrow')
+
+submission_df.to_parquet(
+    'submission_compressed.parquet', 
+    index=False, 
+    engine='pyarrow',
+    compression='snappy'
+)
+
+print("✅ PARQUET files created:")
+print("   📄 submission.parquet (uncompressed)")
+print("   📄 submission_compressed.parquet (with snappy compression)")
+
+if os.path.exists('submission.parquet'):
+    parquet_size = os.path.getsize('submission.parquet') / 1024
+    print(f"   📏 Parquet size: {parquet_size:.2f} KB")
+
+submission_df.to_csv('submission_backup.csv', index=False)
+if os.path.exists('submission_backup.csv'):
+    csv_size = os.path.getsize('submission_backup.csv') / 1024
+    print(f"   📏 CSV size: {csv_size:.2f} KB")
+    print(f"   📈 Space saved: {((csv_size - parquet_size) / csv_size * 100):.1f}%")
+
+print(f"\n📋 Submission Preview:")
+display(submission_df.head(10))
+display(submission_df.tail(10))
+
+print(f"\n✅ Validation Checks:")
+print(f"   📅 Unique dates: {submission_df['date_id'].nunique()}")
+print(f"   📈 Predictions in reasonable range: {-1 < submission_df['market_forward_excess_returns'].mean() < 1}")
+print(f"   🔍 No infinite values: {np.isfinite(submission_df['market_forward_excess_returns']).all()}")
+print(f"   ✨ No missing values: {submission_df.isnull().sum().sum() == 0}")
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ============= SAVE MODELS AND ARTIFACTS =============
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+print("\n" + "="*60)
+print("💾 SAVING MODELS AND ARTIFACTS")
+print("="*60)
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+print(f"🕒 Timestamp: {timestamp}")
+
+xgb_filename = f'best_xgb_model_{timestamp}.joblib'
+joblib.dump(best_xgb, xgb_filename)
+print(f"✅ XGBoost model: {xgb_filename}")
+
+try:
+    nn_filename = f'neural_network_{timestamp}.h5'
+    ffn.save(nn_filename)
+    print(f"✅ Neural Network: {nn_filename}")
+except:
+    print("⚠️  Neural Network save failed")
+
+scaler_filename = f'scaler_{timestamp}.joblib'
+joblib.dump(scaler, scaler_filename)
+print(f"✅ Scaler: {scaler_filename}")
+
+feature_info = {
+    'original_features': features,
+    'available_features': available_features, 
+    'missing_features': missing_features,
+    'feature_count': len(available_features),
+    'timestamp': timestamp
+}
+
+with open(f'feature_info_{timestamp}.json', 'w') as f:
+    json.dump(feature_info, f, indent=2)
+print(f"✅ Feature info: feature_info_{timestamp}.json")
+
+try:
+    val_metrics = {
+        'model_type': model_used,
+        'validation_mse': float(mean_squared_error(y_val, pred_val_g)),
+        'validation_mae': float(mean_absolute_error(y_val, pred_val_g)),
+        'validation_r2': float(r2_score(y_val, pred_val_g)),
+        'strategy_sharpe': float(sharpe_ratio(val_df['strategy_excess_adj'])),
+        'training_samples': int(len(X_train)),
+        'validation_samples': int(len(X_val)),
+        'test_samples': int(len(X_test)),
+        'timestamp': timestamp,
+        'best_xgb_params': best_xgb.get_params()
+    }
+    
+    with open(f'model_metrics_{timestamp}.json', 'w') as f:
+        json.dump(val_metrics, f, indent=2)
+    print(f"✅ Model metrics: model_metrics_{timestamp}.json")
+    
+except Exception as e:
+    print(f"⚠️  Metrics save failed: {e}")
+
+print(f"\n🎯 All artifacts saved with timestamp: {timestamp}")
+
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ============= FINAL VERIFICATION =============
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+print("\n" + "="*60)
+print("🔍 FINAL VERIFICATION")
+print("="*60)
+
+print("📁 Generated files:")
+all_files = glob.glob('*')
+important_files = [f for f in all_files if any(ext in f for ext in ['.parquet', '.joblib', '.h5', '.json', '.csv'])]
+
+for file in sorted(important_files):
+    size = os.path.getsize(file) / 1024
+    print(f"   📄 {file:<35} ({size:>8.2f} KB)")
+
+print(f"\n✅ Parquet File Verification:")
+try:
+    verification_df = pd.read_parquet('submission.parquet')
+    print(f"   ✅ File loads successfully")
+    print(f"   ✅ Shape matches: {verification_df.shape == submission_df.shape}")
+    print(f"   ✅ Data integrity: {verification_df.equals(submission_df)}")
+    
+    print(f"\n📊 Final Submission Stats:")
+    print(f"   📅 Date range: {verification_df['date_id'].min()} to {verification_df['date_id'].max()}")
+    print(f"   📈 Prediction stats:")
+    print(f"      Mean: {verification_df['market_forward_excess_returns'].mean():.6f}")
+    print(f"      Std:  {verification_df['market_forward_excess_returns'].std():.6f}")
+    print(f"      Min:  {verification_df['market_forward_excess_returns'].min():.6f}")
+    print(f"      Max:  {verification_df['market_forward_excess_returns'].max():.6f}")
+    
+except Exception as e:
+    print(f"   ❌ Verification failed: {e}")
+
+print(f"\n🎯 SUBMISSION READY!")
+print(f"   📦 Main file: submission.parquet")
+print(f"   📦 Backup file: submission_compressed.parquet")
+print(f"   📦 CSV backup: submission_backup.csv")
+print(f"\n🚀 You can now submit 'submission.parquet' to the competition!")
+
+print("\n" + "="*60)
+print("✅ NOTEBOOK EXECUTION COMPLETE!")
+print("="*60)
