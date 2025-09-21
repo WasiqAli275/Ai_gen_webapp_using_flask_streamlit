@@ -1,0 +1,57 @@
+Develop a Python Jupyter Notebook that reads the provided Kaggle training and test datasets for the Hull Tactical Market Prediction competition. The goal is to predict daily excess returns of the S&P 500 (target column market_forward_excess_returns) and design a strategy that can potentially outperform the S&P 500 under a 120% volatility cap. For context, this competition challenges the Efficient Market Hypothesis by having participants find predictive signals in market data
+
+. Submissions are scored by a modified Sharpe ratio that penalizes excessive volatility
+
+, so include code to compute returns and the Sharpe metric for any proposed strategy.
+
+Data Loading & Exploration: Use Pandas (import pandas as pd; import numpy as np; from xgboost import XGBRegressor
+
+) to load train.csv and test.csv. Examine the shape, columns, and data types. Identify market_forward_excess_returns as the prediction target. Check for missing values and basic statistics (mean, std) on each feature; note that XGBoost can automatically handle missing values, which may simplify preprocessing
+
+. Plot key series (e.g. S&P forward returns) and visualize feature distributions (histograms, boxplots). Compute and display a correlation matrix or heatmap to identify highly collinear features or relationships with the target.
+
+Feature Engineering: Based on financial and statistical reasoning, create additional features as needed. For example, generate lagged versions of return features or technical indicators (moving averages, momentum, volatility measures). Consider standardizing or normalizing features where appropriate. Use domain knowledge to select or drop features – for example, remove features that are constant or almost identical, as highly correlated features have nearly the same effect on predictions. Use math/statistics (e.g. Pearson correlation or PCA) to reduce dimensionality if many features are redundant.
+
+Machine Learning Models: Implement one or more regression models. Start with XGBoost (e.g. XGBRegressor) as it is widely used for financial prediction and often outperforms simpler models
+
+. Also consider other tree-based models (RandomForest, LightGBM) or linear models for comparison. Split the training data in a time-aware manner (e.g. by date) or use TimeSeriesSplit to avoid lookahead bias. Fit each model on the training set and predict on a validation set. Track performance metrics such as MSE, MAE, or R². Use feature importance from tree models to understand which inputs are most predictive.
+
+Deep Learning Model: Include a neural-network approach as well. For example, build a simple Keras or PyTorch sequential model (a feedforward network or an LSTM) to capture temporal patterns in the data. Keep the network relatively small to avoid overfitting (e.g., one or two hidden layers or LSTM layers, dropout regularization). Compile with an appropriate optimizer and loss (e.g. mean squared error). Train on the training split and evaluate on validation data similarly. Compare its performance to the tree-based models.
+
+Hyperparameter Tuning: Perform systematic tuning of model hyperparameters. For XGBoost and other models, use GridSearchCV or RandomizedSearchCV on a defined grid of parameters. For example, vary max_depth, learning_rate, and n_estimators as shown below
+
+. This example uses a grid search over XGBoost parameters:
+
+``` python
+from sklearn.model_selection import GridSearchCV
+param_grid = {
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'n_estimators': [50, 100, 200]
+}
+grid_search = GridSearchCV(estimator=XGBRegressor(objective='reg:squarederror'), 
+                           param_grid=param_grid, cv=3)
+grid_search.fit(X_train, y_train)  # example tuning step:contentReference[oaicite:6]{index=6}
+```
+
+Record the best hyperparameters and retrain the model using them. If time permits, also tune the neural network (number of layers, units, learning rate, etc.) using tools like Keras Tuner or manual search.
+
+Evaluation and Strategy Simulation: After obtaining predictions, translate them into portfolio weights between 0 and 2 (as allowed by the competition). For example, normalize or clip model outputs to the [0, 2] range. Simulate the strategy by applying these weights to the next-day returns (using forward_returns and risk_free_rate columns). Compute cumulative returns and the strategy’s Sharpe ratio. Remember to penalize excess volatility: compare the strategy’s volatility to the market’s, as the scoring metric will do
+
+. Output performance metrics (Sharpe ratio, total return) and possibly plots of cumulative returns vs. the S&P benchmark.
+
+Environment and Versions: Ensure compatibility with Kaggle’s default Python environment (typically Python 3.10+). Use built-in libraries: e.g., Pandas (~1.5+), NumPy, scikit-learn (~1.2+), XGBoost (~1.7+), TensorFlow 2.x/Keras or PyTorch 2.x. For reproducibility, print out library versions (e.g., pd.__version__, xgboost.__version__). The code snippets above assume Kaggle’s environment (no internet) and standard library availability
+
+. Document the notebook steps clearly with markdown and comments.
+
+Documentation: Throughout the notebook, explain each step with markdown cells. Include brief references to financial context (e.g. mention that beating the S&P contradicts the Efficient Market Hypothesis
+
+). Use math and statistics to justify choices (e.g. explain variance, correlation, or Sharpe ratio calculations). The final notebook should be self-explanatory, showing all analyses, models, and results for predicting returns with high accuracy.
+
+
+
+References: For context on the competition’s goal and metric, see the Kaggle announcement
+
+. For an example of using XGBoost and hyperparameter tuning in stock prediction, see Sercan Bugra Gultekin’s walkthrough
+
+. These inform the approach (XGBoost’s strengths and tuning strategy) but your code should be original and tailored to this dataset.
