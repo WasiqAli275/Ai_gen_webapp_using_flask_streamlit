@@ -1,0 +1,101 @@
+# Market Prediction Notebook
+# Using train.csv (with target) and test.csv (without target)
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+
+import xgboost as xgb
+from xgboost import XGBRegressor
+
+# ---------------------------
+# 1. Load Data
+# ---------------------------
+train = pd.read_csv("/mnt/data/train.csv")
+test = pd.read_csv("/mnt/data/test.csv")
+
+print("Train shape:", train.shape)
+print("Test shape:", test.shape)
+
+# ---------------------------
+# 2. Quick Data Check
+# ---------------------------
+print("Train columns:", train.columns.tolist())
+print("Missing values in train:", train.isnull().sum().sum())
+print("Missing values in test:", test.isnull().sum().sum())
+
+# Target variable
+TARGET = "market_forward_excess_returns"
+
+# ---------------------------
+# 3. Feature Selection & Scaling
+# ---------------------------
+X = train.drop(columns=[TARGET])
+y = train[TARGET]
+
+X_test = test.copy()
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+X_test_scaled = scaler.transform(X_test)
+
+# ---------------------------
+# 4. Model Training (XGBoost)
+# ---------------------------
+params = {
+    'objective': 'reg:squarederror',
+    'eval_metric': 'rmse',
+    'random_state': 42
+}
+
+xgb_model = XGBRegressor(**params)
+
+# Hyperparameter tuning using GridSearchCV
+grid = {
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.05, 0.1],
+    'n_estimators': [100, 200, 500]
+}
+
+ts_split = TimeSeriesSplit(n_splits=5)
+
+search = GridSearchCV(xgb_model, param_grid=grid, cv=ts_split, scoring='neg_mean_squared_error', verbose=1, n_jobs=-1)
+search.fit(X_scaled, y)
+
+print("Best params:", search.best_params_)
+
+best_model = search.best_estimator_
+
+# ---------------------------
+# 5. Evaluation on Train Data
+# ---------------------------
+preds = best_model.predict(X_scaled)
+rmse = np.sqrt(mean_squared_error(y, preds))
+r2 = r2_score(y, preds)
+print("Train RMSE:", rmse)
+print("Train R²:", r2)
+
+plt.figure(figsize=(8,5))
+plt.scatter(y, preds, alpha=0.6)
+plt.xlabel("Actual Returns")
+plt.ylabel("Predicted Returns")
+plt.title("Actual vs Predicted (Train)")
+plt.show()
+
+# ---------------------------
+# 6. Predict on Test Data
+# ---------------------------
+test_predictions = best_model.predict(X_test_scaled)
+
+submission = pd.DataFrame({
+    'row_id': np.arange(len(test_predictions)),
+    'prediction': test_predictions
+})
+
+print(submission.head())
+submission.to_csv("submission.csv", index=False)
